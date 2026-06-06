@@ -33,10 +33,13 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.FileInputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.io.PrintWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -46,6 +49,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -55,9 +59,18 @@ import androidx.compose.ui.platform.LocalContext
 import android.media.MediaRecorder
 import android.os.Build
 import java.io.File
+import android.util.Log
+import java.io.DataOutputStream
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversation
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationParam
+import com.alibaba.dashscope.common.MultiModalMessage
+import com.alibaba.dashscope.common.Role
+import com.alibaba.dashscope.utils.Constants
+import kotlinx.coroutines.withContext
 
 
 class MainActivity : ComponentActivity() {
+    @SuppressLint("DefaultLocale")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -131,7 +144,7 @@ class MainActivity : ComponentActivity() {
                                     .weight(1f) // 关键：设置权重为 1，让输入框尽可能变宽，把按钮挤到右边
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            // 右侧的按钮（此时不实现功能）
+                            // 右侧的按钮
                             IconButton(onClick = {
                                 // 检查权限
                                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
@@ -167,13 +180,26 @@ class MainActivity : ComponentActivity() {
                                             try {
                                                 stop()
                                                 release()
+
                                             } catch (e: Exception) {
                                                 e.printStackTrace()
                                             }
                                         }
                                         recorder = null
                                         isRecording = false
-                                        Toast.makeText(context, "录音已保存: ${tempFile.absolutePath}", Toast.LENGTH_LONG).show()
+
+                                        // 录音结束后，在协程中调用 ASR
+                                        lifecycleScope.launch {
+                                            try {
+                                                displayText += "[系统] 正在识别语音...\n"
+                                                val recognizedText = transcribeAudioWithSdk(tempFile)
+                                                if (recognizedText.isNotEmpty()) {
+                                                    displayText += "[语音] $recognizedText\n"
+                                                }
+                                            } catch (e: Exception) {
+                                                displayText += "[错误] 语音识别失败: ${e.message}\n"
+                                            }
+                                        }
 
                                     }
                                 } else {
@@ -318,6 +344,85 @@ class MainActivity : ComponentActivity() {
         } finally {
             // 无论成功失败，关闭连接释放资源
             connection?.disconnect()
+        }
+    }
+
+    /**
+     * 将录音文件发送给千问 ASR 模型进行语音转文字
+     */
+    private suspend fun transcribeAudioWithSdk(audioFile: File): String = withContext(Dispatchers.IO) {
+        // ⚠️ 安全提示：请保护好你的 API Key，生产环境切勿硬编码
+        val apiKey = "sk-3789f764667445d0948ed70bee3da170"
+
+        // 1. 初始化基础 API 路径（北京地域固定要求）
+        Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1"
+
+        try {
+            // 2. 将本地 File 转化为百炼 SDK 规范的本地 File URL
+            val localFilePath = "file://${audioFile.absolutePath}"
+
+            // 3. 核心修改：明确指定音频格式为 m4a（兼容你之前定义的临时文件）
+            // 如果你未来换回 mp3，这里改为 "audio/mp3" 即可
+            val audioContent = mapOf(
+                "audio" to localFilePath,
+                "mimetype" to "audio/m4a"
+            )
+
+            val userMessage = MultiModalMessage.builder()
+                .role(Role.USER.value)
+                .content(listOf(audioContent))
+                .build()
+
+            // 4. 配置语音识别的可选参数
+            val asrOptions = hashMapOf<String, Any>(
+                "enable_itn" to true // 💡 建议改为 true：自动将“一二三”转为“123”，更符合阅读习惯
+            )
+
+            // 5. 组装请求参数
+            val param = MultiModalConversationParam.builder()
+                .apiKey(apiKey)
+                .model("qwen3-asr-flash") // 使用闪速语音大模型
+                .message(userMessage)
+                .parameter("asr_options", asrOptions)
+                .build()
+
+            // 6. 发起同步调用（在 Dispatchers.IO 中执行，保证不卡死 Android 界面）
+            val conv = MultiModalConversation()
+            val result = conv.call(param)
+
+            // ======= 🛠️ 把第 7 步和第 8 步修改为以下安全解析方式 =======
+
+            // 1. 安全获取 choices 列表
+            val choices = result.output?.choices
+            if (!choices.isNullOrEmpty()) {
+                // 2. 拿到第一条回复
+                val firstChoice = choices[0]
+                val message = firstChoice.message
+
+                // 3. qwen3-asr-flash 的文本可能存在两个地方，我们做个双保险读取：
+                // 先尝试读取多模态的 content 列表，如果为空，直接读取普通的 content 字符串
+                val contents = message.content as? List<*>
+                var textResult = ""
+
+                if (!contents.isNullOrEmpty()) {
+                    // 如果是标准的多模态 List 结构
+                    val firstContent = contents[0] as? Map<*, *>
+                    textResult = firstContent?.get("text")?.toString() ?: ""
+                }
+
+                if (textResult.isEmpty()) {
+                    // 如果上面没取到，直接尝试拿普通的文本字段
+                    textResult = message.content?.toString() ?: ""
+                }
+
+                return@withContext textResult.trim().ifEmpty { "语音识别成功，但未检测到说话内容" }
+            }
+
+            return@withContext "大模型未返回有效数据"
+
+        } catch (e: Exception) {
+            // 向上抛出异常，让外层的 try-catch 捕获并显示在界面上
+            throw Exception("语音转文字失败: ${e.message}", e)
         }
     }
 
