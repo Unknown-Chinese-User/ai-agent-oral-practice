@@ -33,13 +33,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
-import java.io.FileInputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.PrintWriter
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.UUID
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -50,6 +47,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -59,15 +57,43 @@ import androidx.compose.ui.platform.LocalContext
 import android.media.MediaRecorder
 import android.os.Build
 import java.io.File
-import android.util.Log
-import java.io.DataOutputStream
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversation
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationParam
 import com.alibaba.dashscope.common.MultiModalMessage
 import com.alibaba.dashscope.common.Role
 import com.alibaba.dashscope.utils.Constants
-import kotlinx.coroutines.withContext
+import android.content.SharedPreferences
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.core.content.edit
 
+class ApiKeyManager(context: Context) {
+    // 创建一个名为 "app_config" 的本地存储文件
+    private val prefs: SharedPreferences = context.getSharedPreferences("app_config", Context.MODE_PRIVATE)
+    companion object {
+        private const val KEY_API_KEY = "dashscope_api_key"
+    }
+    /**
+     * 保存 API Key 到本地
+     */
+    fun saveApiKey(apiKey: String) {
+        prefs.edit { putString(KEY_API_KEY, apiKey) }
+    }
+    /**
+     * 从本地读取 API Key，如果找不到则返回空字符串 ""
+     */
+    fun getApiKey(): String {
+        return prefs.getString(KEY_API_KEY, "") ?: ""
+    }
+    /**
+     * 判断本地是否已经配置过 API Key
+     */
+    fun hasApiKey(): Boolean {
+        return getApiKey().isNotEmpty()
+    }
+}
 
 class MainActivity : ComponentActivity() {
     @SuppressLint("DefaultLocale")
@@ -78,6 +104,8 @@ class MainActivity : ComponentActivity() {
             MyApplicationTheme {
                 // 1. 获取 Context (如果之前没有定义，请加上)
                 val context = LocalContext.current
+                val apiKeyManager = remember { ApiKeyManager(context) }
+                var showKeyDialog by remember { mutableStateOf(false) }
 
                 // 2. 定义权限申请的回调处理
                 val permissionLauncher = rememberLauncherForActivityResult(
@@ -129,231 +157,196 @@ class MainActivity : ComponentActivity() {
                         }
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // 中间的文本输入框，使用row包裹
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically // 垂直居中
-                        )
-                        {
-                            // 左侧的输入框
-                            OutlinedTextField(
-                                value = inputText,
-                                onValueChange = { inputText = it },
-                                label = { Text("请输入文本") },
-                                modifier = Modifier
-                                    .weight(1f) // 关键：设置权重为 1，让输入框尽可能变宽，把按钮挤到右边
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            // 右侧的按钮
-                            IconButton(onClick = {
-                                // 检查权限
-                                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                                    if (!isRecording) {
-                                        // --- 开始录音逻辑 ---
-                                        try {
-                                            // 兼容不同 Android 版本的构造函数
-                                            val newRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                                MediaRecorder(context)
-                                            } else {
-                                                @Suppress("DEPRECATION")
-                                                MediaRecorder()
-                                            }
-
-                                            // 配置录音参数
-                                            newRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-                                            newRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                                            newRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                                            newRecorder.setOutputFile(tempFile.absolutePath)
-
-                                            newRecorder.prepare()
-                                            newRecorder.start()
-
-                                            recorder = newRecorder
-                                            isRecording = true
-                                            Toast.makeText(context, "开始录音...", Toast.LENGTH_SHORT).show()
-                                        } catch (e: Exception) {
-                                            Toast.makeText(context, "录音出错: ${e.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    } else {
-                                        // --- 停止录音逻辑 ---
-                                        recorder?.apply {
-                                            try {
-                                                stop()
-                                                release()
-
-                                            } catch (e: Exception) {
-                                                e.printStackTrace()
-                                            }
-                                        }
-                                        recorder = null
-                                        isRecording = false
-
-                                        // 录音结束后，在协程中调用 ASR
-                                        lifecycleScope.launch {
-                                            try {
-                                                displayText += "[系统] 正在识别语音...\n"
-                                                val recognizedText = transcribeAudioWithSdk(tempFile)
-                                                if (recognizedText.isNotEmpty()) {
-                                                    displayText += "[语音] $recognizedText\n"
-                                                }
-                                            } catch (e: Exception) {
-                                                displayText += "[错误] 语音识别失败: ${e.message}\n"
-                                            }
+                        // 中间的麦克风调用按钮
+                        IconButton(onClick = {
+                            // 检查权限
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                if (!isRecording) {
+                                    // --- 开始录音逻辑 ---
+                                    try {
+                                        // 兼容不同 Android 版本的构造函数
+                                        val newRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                            MediaRecorder(context)
+                                        } else {
+                                            @Suppress("DEPRECATION")
+                                            MediaRecorder()
                                         }
 
+                                        // 配置录音参数
+                                        newRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                                        newRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                                        newRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                                        newRecorder.setOutputFile(tempFile.absolutePath)
+
+                                        newRecorder.prepare()
+                                        newRecorder.start()
+
+                                        recorder = newRecorder
+                                        isRecording = true
+                                        Toast.makeText(context, "开始录音...", Toast.LENGTH_SHORT).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "录音出错: ${e.message}", Toast.LENGTH_SHORT).show()
                                     }
                                 } else {
-                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    // --- 停止录音逻辑 ---
+                                    recorder?.apply {
+                                        try {
+                                            stop()
+                                            release()
+
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                        }
+                                    }
+                                    recorder = null
+                                    isRecording = false
+
+                                    // 录音结束后，在协程中调用 ASR
+                                    lifecycleScope.launch {
+                                        try {
+                                            displayText += "[系统] 正在识别语音...\n"
+                                            // 从本地存储管理器中，动态捞出记住的密钥
+                                            val currentKey = apiKeyManager.getApiKey()
+                                            val recognizedText = transcribeAudioWithSdk(tempFile, currentKey)
+
+                                            if (recognizedText.isNotEmpty()) {
+                                                displayText += "[语音] $recognizedText\n"
+                                            }
+                                        } catch (e: Exception) {
+                                            displayText += "[错误] 语音识别失败: ${e.message}\n"
+                                        }
+                                    }
+
                                 }
-                            }) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                                    contentDescription = "发送到千问" // 辅助描述
-                                )
+                            } else {
+                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
+                        }) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = "发送到千问" // 辅助描述
+                            )
                         }
+
                         Spacer(modifier = Modifier.height(24.dp))
                         
                         // 按钮：将输入框的内容追加到上方大文本框
                         Button(
                             onClick = {
-                                if (inputText.isNotEmpty()) {
-                                    displayText += "[用户]${inputText}\n"
-
-                                    // 2. 开启一个协程处理网络请求 (防止界面卡顿)
-                                    lifecycleScope.launch {
-                                        try {
-                                            // 调用我们下面编写的发往千问模型的函数
-                                            val qwenReply = askQwenModel(inputText)
-                                            // 当模型回复回来后，将结果追加到屏幕上方
-                                            displayText += "[AI 回复]: ${qwenReply}\n"
-                                        } catch (e: Exception) {
-                                            displayText += "出错了: ${e.message}\n"
-                                        }
-                                    }
-                                }
-                                inputText=""
+                                showKeyDialog=true
                             }
                         )
                         {
-                            Text(text = "添加到上方")
+                            Text(text = "管理我的 API Key")
                         }
                         Spacer(modifier = Modifier.height(24.dp))
+                        EditApiKeyDialog(
+                            showDialog = showKeyDialog,
+                            onDismissRequest = { showKeyDialog = false }, // 当用户在弹窗里点“取消”或点外面时，关闭弹窗
+                            apiKeyManager = apiKeyManager,
+                            onKeySaved = { updatedKey ->
+                                // 当用户在弹窗里点了保存，这里会收到最新存储的真实 key 字符串
+                                // 如果你想在主界面感知到变化，可以在这里更新你的其他界面状态
+                            }
+                        )
                     }
                 }
             }
         }
     }
-    /**
-     * 这是一个用于发起网络请求的辅助函数
-     * 问题：what is the weather today
-     */
-    private suspend fun askQwenModel(prompt: String): String = withContext(Dispatchers.IO) {
-        // 1. 替换为你自己在阿里云百炼申请的 API Key
-        val apiKey = "sk-3789f764667445d0948ed70bee3da170"
-        val urlString = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
-        var connection: HttpURLConnection? = null
+    @Composable
+    fun EditApiKeyDialog(
+        showDialog: Boolean,
+        onDismissRequest: () -> Unit,
+        apiKeyManager: ApiKeyManager,
+        onKeySaved: (String) -> Unit
+    ) {
+        if (!showDialog) return // 如果开关是 false，直接不渲染任何 UI
 
-        try {
-            // 2. 构造 JSON 请求体 (使用 Android 自带的 org.json)
-            val jsonBody = JSONObject().apply {
-                put("model", "qwen-turbo") // 可更换为 "qwen-max" 等其他模型
+        val context = LocalContext.current
 
-                val messagesArray = JSONArray().apply {
-                    // 1. 插入系统级约束（System Role）
-                    put(JSONObject().apply {
-                        put("role", "system")
-                        put("content", """
-                            你是一位亲切、有耐心的英语口语陪练老师。
-                            当前场景：情景口语自由练习（如：咖啡厅点餐、机场值机、日常闲聊等）。
-                            
-                            请严格遵守以下约束：
-                            1. 你的回复必须简短、地道、口语化，字数控制在2-3句话以内，绝对不要回复长篇大论。
-                            2. 每次回复的结尾，请抛出一个自然、相关的小问题，引导我继续说下去。
-                            3. 如果我的表达有明显的严重语法错误，请在回复的最开头用括号简短纠正一下（例如：[纠正: 应为 "I went to..." 而不是 "I go to yesterday"]），然后再用英文继续对话。如果没有错误则不用纠正。
-                            4. 全程请用英文与我对话（除非纠正语法时可以用中文说明）。
-                        """.trimIndent())
-                    })
+        // 1. 记住输入框里的文本，初始值直接去本地捞现有的 Key
+        var inputKey by remember { mutableStateOf(apiKeyManager.getApiKey()) }
 
-                    // 2. 插入用户的实际输入
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", prompt) // 这里的 prompt 就是用户在手机上输入的聊天内容
-                    })
+        AlertDialog(
+            onDismissRequest = onDismissRequest,
+            title = { Text(text = "配置 / 修改 API Key") },
+            text = {
+                Column {
+                    Text(
+                        text = "目前保存的 Key：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+
+                    )
+                    // 如果本地有旧的 Key，脱敏显示一下，没有就显示“无”
+                    val currentLocalKey = apiKeyManager.getApiKey()
+                    Text(
+                        text = if (currentLocalKey.isEmpty()) "（当前未设置）" else "${currentLocalKey.take(4)}****${currentLocalKey.takeLast(4)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 2. 供用户编辑的文本输入框
+                    OutlinedTextField(
+                        value = inputKey,
+                        onValueChange = { inputKey = it },
+                        label = { Text("在此输入或粘贴新的 sk-...") },
+                        placeholder = { Text("sk-...") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
-                put("messages", messagesArray)
-            }
-
-            // 3. 初始化网络连接
-            val url = URL(urlString)
-            connection = url.openConnection() as HttpURLConnection
-            connection.apply {
-                requestMethod = "POST"
-                connectTimeout = 30000 // 30秒连接超时
-                readTimeout = 30000    // 30秒读取超时
-                doOutput = true        // 允许发送请求体
-                doInput = true         // 允许接收响应体
-
-                // 设置请求头
-                setRequestProperty("Authorization", "Bearer $apiKey")
-                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                setRequestProperty("Accept", "application/json")
-            }
-
-            // 4. 写入请求数据
-            OutputStreamWriter(connection.outputStream, "UTF-8").use { writer ->
-                writer.write(jsonBody.toString())
-                writer.flush()
-            }
-
-            // 5. 获取响应状态码并读取结果
-            val responseCode = connection.responseCode
-            if (responseCode == HttpURLConnection.HTTP_OK) {
-                // 请求成功，读取返回的 JSON 字符串
-                val responseString = BufferedReader(InputStreamReader(connection.inputStream, "UTF-8")).use { reader ->
-                    val response = StringBuilder()
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null) {
-                        response.append(line)
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmedKey = inputKey.trim()
+                        if (trimmedKey.isNotEmpty()) {
+                            // 3. 点击保存后更新本地持久化（推荐的 KTX 内部写好了）
+                            apiKeyManager.saveApiKey(trimmedKey)
+                            onKeySaved(trimmedKey) // 通知外部
+                            onDismissRequest() // 关闭弹窗
+                            Toast.makeText(context, "更新成功", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Key 不能为空哦", Toast.LENGTH_SHORT).show()
+                        }
                     }
-                    response.toString()
+                ) {
+                    Text("保存更新")
                 }
+            },
+            dismissButton = {
+                Row {
+                    // 如果原本就有 Key，允许用户一键清除
+                    if (apiKeyManager.hasApiKey()) {
+                        TextButton(
+                            onClick = {
+                                apiKeyManager.saveApiKey("") // 传入空代表清除
+                                onKeySaved("")
+                                onDismissRequest()
+                                Toast.makeText(context, "已清除配置", Toast.LENGTH_SHORT).show()
+                            }
+                        ) {
+                            Text("清除配置", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
 
-                // 6. 解析模型返回的 JSON
-                val jsonResponse = JSONObject(responseString)
-                val choices = jsonResponse.optJSONArray("choices")
-                if (choices != null && choices.length() > 0) {
-                    val firstChoice = choices.getJSONObject(0)
-                    val messageObj = firstChoice.optJSONObject("message")
-                    return@withContext messageObj?.optString("content") ?: "未解析到文本内容"
-                } else {
-                    return@withContext "模型未返回有效 choices"
+                    TextButton(onClick = onDismissRequest) {
+                        Text("取消")
+                    }
                 }
-            } else {
-                // 请求失败，读取错误流信息
-                val errorString = BufferedReader(InputStreamReader(connection.errorStream ?: connection.inputStream, "UTF-8")).use { reader ->
-                    reader.readText()
-                }
-                throw Exception("HTTP 错误码: $responseCode, 详情: $errorString")
             }
-
-        } catch (e: Exception) {
-            // 将异常继续向上抛出，触发你外层的 try-catch，从而把错误显示在 displayText 上
-            throw Exception("网络请求失败: ${e.message}", e)
-        } finally {
-            // 无论成功失败，关闭连接释放资源
-            connection?.disconnect()
-        }
+        )
     }
 
     /**
      * 将录音文件发送给千问 ASR 模型进行语音转文字
      */
-    private suspend fun transcribeAudioWithSdk(audioFile: File): String = withContext(Dispatchers.IO) {
-        // ⚠️ 安全提示：请保护好你的 API Key，生产环境切勿硬编码
-        val apiKey = "sk-3789f764667445d0948ed70bee3da170"
-
+    private suspend fun transcribeAudioWithSdk(audioFile: File, currentKey: String): String = withContext(Dispatchers.IO) {
         // 1. 初始化基础 API 路径（北京地域固定要求）
         Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1"
 
@@ -380,7 +373,7 @@ class MainActivity : ComponentActivity() {
 
             // 5. 组装请求参数
             val param = MultiModalConversationParam.builder()
-                .apiKey(apiKey)
+                .apiKey(currentKey)
                 .model("qwen3-asr-flash") // 使用闪速语音大模型
                 .message(userMessage)
                 .parameter("asr_options", asrOptions)
