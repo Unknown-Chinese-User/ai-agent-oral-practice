@@ -203,18 +203,31 @@ class MainActivity : ComponentActivity() {
 
                                     // 录音结束后，在协程中调用 ASR
                                     lifecycleScope.launch {
+                                        var currentKey=""
+                                        var recognizedText=""
+                                        var qwenReply=""
                                         try {
                                             displayText += "[系统] 正在识别语音...\n"
                                             // 从本地存储管理器中，动态捞出记住的密钥
-                                            val currentKey = apiKeyManager.getApiKey()
-                                            val recognizedText = transcribeAudioWithSdk(tempFile, currentKey)
+                                            currentKey = apiKeyManager.getApiKey()
+                                            recognizedText = transcribeAudioWithSdk(tempFile, currentKey)
 
                                             if (recognizedText.isNotEmpty()) {
                                                 displayText += "[语音] $recognizedText\n"
+
                                             }
                                         } catch (e: Exception) {
                                             displayText += "[错误] 语音识别失败: ${e.message}\n"
                                         }
+                                        try {
+                                            // 调用我们下面编写的发往千问模型的函数
+                                            qwenReply = askQwenModel(recognizedText, currentKey)
+                                            // 当模型回复回来后，将结果追加到屏幕上方
+                                            displayText += "[AI 回复]: ${qwenReply}\n"
+                                        } catch (e: Exception) {
+                                            displayText += "AI回复出错了: ${e.message}\n"
+                                        }
+
                                     }
 
                                 }
@@ -230,7 +243,7 @@ class MainActivity : ComponentActivity() {
 
                         Spacer(modifier = Modifier.height(24.dp))
                         
-                        // 按钮：将输入框的内容追加到上方大文本框
+                        // 按钮：管理apikey
                         Button(
                             onClick = {
                                 showKeyDialog=true
@@ -240,6 +253,7 @@ class MainActivity : ComponentActivity() {
                             Text(text = "管理我的 API Key")
                         }
                         Spacer(modifier = Modifier.height(24.dp))
+                        //apikey弹窗的组件
                         EditApiKeyDialog(
                             showDialog = showKeyDialog,
                             onDismissRequest = { showKeyDialog = false }, // 当用户在弹窗里点“取消”或点外面时，关闭弹窗
@@ -254,7 +268,106 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+    /**
+     * 这是一个用于发起网络请求的辅助函数
+     * 问题：what is the weather today
+     */
+    private suspend fun askQwenModel(prompt: String,apiKey:String): String = withContext(Dispatchers.IO) {
+        val urlString = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
+        var connection: HttpURLConnection? = null
+
+        try {
+            // 2. 构造 JSON 请求体 (使用 Android 自带的 org.json)
+            val jsonBody = JSONObject().apply {
+                put("model", "qwen-turbo") // 可更换为 "qwen-max" 等其他模型
+
+                val messagesArray = JSONArray().apply {
+                    // 1. 插入系统级约束（System Role）
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", """
+                            你是一位亲切、有耐心的英语口语陪练老师。
+                            当前场景：情景口语自由练习（如：咖啡厅点餐、机场值机、日常闲聊等）。
+                            
+                            请严格遵守以下约束：
+                            1. 你的回复必须简短、地道、口语化，字数控制在2-3句话以内，绝对不要回复长篇大论。
+                            2. 每次回复的结尾，请抛出一个自然、相关的小问题，引导我继续说下去。
+                            3. 如果我的表达有明显的严重语法错误，请在回复的最开头用括号简短纠正一下（例如：[纠正: 应为 "I went to..." 而不是 "I go to yesterday"]），然后再用英文继续对话。如果没有错误则不用纠正。
+                            4. 全程请用英文与我对话（除非纠正语法时可以用中文说明）。
+                        """.trimIndent())
+                    })
+
+                    // 2. 插入用户的实际输入
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", prompt) // 这里的 prompt 就是用户在手机上输入的聊天内容
+                    })
+                }
+                put("messages", messagesArray)
+            }
+
+            // 3. 初始化网络连接
+            val url = URL(urlString)
+            connection = url.openConnection() as HttpURLConnection
+            connection.apply {
+                requestMethod = "POST"
+                connectTimeout = 30000 // 30秒连接超时
+                readTimeout = 30000    // 30秒读取超时
+                doOutput = true        // 允许发送请求体
+                doInput = true         // 允许接收响应体
+
+                // 设置请求头
+                setRequestProperty("Authorization", "Bearer $apiKey")
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Accept", "application/json")
+            }
+
+            // 4. 写入请求数据
+            OutputStreamWriter(connection.outputStream, "UTF-8").use { writer ->
+                writer.write(jsonBody.toString())
+                writer.flush()
+            }
+
+            // 5. 获取响应状态码并读取结果
+            val responseCode = connection.responseCode
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                // 请求成功，读取返回的 JSON 字符串
+                val responseString = BufferedReader(InputStreamReader(connection.inputStream, "UTF-8")).use { reader ->
+                    val response = StringBuilder()
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        response.append(line)
+                    }
+                    response.toString()
+                }
+
+                // 6. 解析模型返回的 JSON
+                val jsonResponse = JSONObject(responseString)
+                val choices = jsonResponse.optJSONArray("choices")
+                if (choices != null && choices.length() > 0) {
+                    val firstChoice = choices.getJSONObject(0)
+                    val messageObj = firstChoice.optJSONObject("message")
+                    return@withContext messageObj?.optString("content") ?: "未解析到文本内容"
+                } else {
+                    return@withContext "模型未返回有效 choices"
+                }
+            } else {
+                // 请求失败，读取错误流信息
+                val errorString = BufferedReader(InputStreamReader(connection.errorStream ?: connection.inputStream, "UTF-8")).use { reader ->
+                    reader.readText()
+                }
+                throw Exception("HTTP 错误码: $responseCode, 详情: $errorString")
+            }
+
+        } catch (e: Exception) {
+            // 将异常继续向上抛出，触发你外层的 try-catch，从而把错误显示在 displayText 上
+            throw Exception("网络请求失败: ${e.message}", e)
+        } finally {
+            // 无论成功失败，关闭连接释放资源
+            connection?.disconnect()
+        }
+    }
     @Composable
     fun EditApiKeyDialog(
         showDialog: Boolean,
