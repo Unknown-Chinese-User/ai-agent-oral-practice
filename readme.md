@@ -1,3 +1,3 @@
 这是一个基于Kotlin的ai对话app，对接入的大模型进行了简单约束使其只输出英语并进行纠错
 
-demo视频是<video src="./demo视频.mp4" width="300" controls></video>
+demo视频是该文件夹下的./demo视频.mp4
