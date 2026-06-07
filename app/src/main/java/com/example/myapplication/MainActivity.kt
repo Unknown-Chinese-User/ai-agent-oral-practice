@@ -148,7 +148,6 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.Top
                     ) {
                         var displayText by remember { mutableStateOf("") }
-//
 
                         // 上方的大文本展示框，使用 Box 包裹 Text，形成滑动窗口
                         Box(
@@ -162,7 +161,7 @@ class MainActivity : ComponentActivity() {
                         {
                             // 实际的文本组件
                             Text(
-                                text = displayText.ifEmpty { "点击按钮将显示在此处" },
+                                text = displayText.ifEmpty { "点击按钮后文字将显示在此处" },
                                 modifier = Modifier.padding(16.dp) // 文本内部留一点距离，防止文字贴着屏幕边缘
                             )
                         }
@@ -170,6 +169,10 @@ class MainActivity : ComponentActivity() {
 
                         // 中间的麦克风调用按钮
                         IconButton(onClick = {
+                            if (!apiKeyManager.hasApiKey()) {
+                                Toast.makeText(context, "请先配置 API Key", Toast.LENGTH_SHORT).show()
+                                return@IconButton
+                            }
                             // 检查权限
                             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                 if (!isRecording) {
