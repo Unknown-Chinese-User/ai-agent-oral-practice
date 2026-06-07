@@ -1,6 +1,7 @@
 package com.example.myapplication
 
 import android.os.Bundle
+import android.media.AudioManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -227,7 +228,7 @@ class MainActivity : ComponentActivity() {
                                             recognizedText = transcribeAudioWithSdk(tempFile, currentKey)
 
                                             if (recognizedText.isNotEmpty()) {
-                                                displayText += "[语音] $recognizedText\n"
+                                                displayText += "[用户语音] $recognizedText\n"
 
                                             }
                                         } catch (e: Exception) {
@@ -243,11 +244,15 @@ class MainActivity : ComponentActivity() {
                                         }
                                         try {
                                             speechFile=generateSpeechFromText(qwenReply,currentKey,context)
-                                            Toast.makeText(context, "${speechFile.absolutePath}", Toast.LENGTH_SHORT).show()
+//                                            Toast.makeText(context, "${speechFile.absolutePath}", Toast.LENGTH_SHORT).show()
                                         }catch (e: Exception) {
                                             displayText += "生成语音出错了: ${e.message}\n"
                                         }
-
+                                        try{
+                                            playAudioFile(context,speechFile)
+                                        }catch (e: Exception){
+                                            displayText+="播放语音出错了: ${e.message}\n"
+                                        }
 
                                     }
 
@@ -488,7 +493,7 @@ class MainActivity : ComponentActivity() {
         val requestBody = JSONObject().apply {
             put("model", "qwen3-tts-flash")
             put("input", JSONObject().apply {
-                put("text", "你好")
+                put("text", textToSpeak)
                 put("voice", "Cherry")
             })
         }.toString()
@@ -565,13 +570,12 @@ class MainActivity : ComponentActivity() {
     /**
      * 播放本地音频文件的安全函数
      */
-    private suspend fun playAudioFile(context: Context, audioFile: File) {
+    private suspend fun playAudioFile(context: Context, audioFile: File?) {
         // 1. 安全检查：如果文件不存在或大小为0，不进行播放
-        if (!audioFile.exists() || audioFile.length() == 0L) {
+        if (audioFile==null||!audioFile.exists() || audioFile.length() == 0L) {
             Toast.makeText(context, "音频文件不存在或尚未下载完成", Toast.LENGTH_SHORT).show()
             return
         }
-
         try {
             // 2. 实例化系统播放器
             val mediaPlayer = MediaPlayer()
