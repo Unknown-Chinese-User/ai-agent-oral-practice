@@ -38,7 +38,6 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 //import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -68,6 +67,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.core.content.edit
+//import com.alibaba.dashscope.aigc.multimodalconversation.AudioParameters
+import android.media.MediaPlayer
+import android.net.Uri
+import android.util.Log
+import okhttp3.*
+import java.security.MessageDigest
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 class ApiKeyManager(context: Context) {
     // 创建一个名为 "app_config" 的本地存储文件
@@ -137,7 +147,7 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.Top
                     ) {
                         var displayText by remember { mutableStateOf("") }
-                        var inputText by remember { mutableStateOf("") }
+//
 
                         // 上方的大文本展示框，使用 Box 包裹 Text，形成滑动窗口
                         Box(
@@ -206,6 +216,10 @@ class MainActivity : ComponentActivity() {
                                         var currentKey=""
                                         var recognizedText=""
                                         var qwenReply=""
+                                        var reply=""
+
+
+                                        var speechFile: File? = null
                                         try {
                                             displayText += "[系统] 正在识别语音...\n"
                                             // 从本地存储管理器中，动态捞出记住的密钥
@@ -227,6 +241,13 @@ class MainActivity : ComponentActivity() {
                                         } catch (e: Exception) {
                                             displayText += "AI回复出错了: ${e.message}\n"
                                         }
+                                        try {
+                                            speechFile=generateSpeechFromText(qwenReply,currentKey,context)
+                                            Toast.makeText(context, "${speechFile.absolutePath}", Toast.LENGTH_SHORT).show()
+                                        }catch (e: Exception) {
+                                            displayText += "生成语音出错了: ${e.message}\n"
+                                        }
+
 
                                     }
 
@@ -234,13 +255,13 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
-                        }) {
+                        })
+                        {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                                 contentDescription = "发送到千问" // 辅助描述
                             )
                         }
-
                         Spacer(modifier = Modifier.height(24.dp))
                         
                         // 按钮：管理apikey
@@ -368,6 +389,224 @@ class MainActivity : ComponentActivity() {
             connection?.disconnect()
         }
     }
+
+    /**
+     * 将录音文件发送给千问 ASR 模型进行语音转文字
+     */
+    private suspend fun transcribeAudioWithSdk(audioFile: File, currentKey: String): String = withContext(Dispatchers.IO) {
+        // 1. 初始化基础 API 路径（北京地域固定要求）
+        Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1"
+
+        try {
+            // 2. 将本地 File 转化为百炼 SDK 规范的本地 File URL
+            val localFilePath = "file://${audioFile.absolutePath}"
+
+            // 3. 核心修改：明确指定音频格式为 m4a（兼容你之前定义的临时文件）
+            // 如果你未来换回 mp3，这里改为 "audio/mp3" 即可
+            val audioContent = mapOf(
+                "audio" to localFilePath,
+                "mimetype" to "audio/m4a"
+            )
+
+            val userMessage = MultiModalMessage.builder()
+                .role(Role.USER.value)
+                .content(listOf(audioContent))
+                .build()
+
+            // 4. 配置语音识别的可选参数
+            val asrOptions = hashMapOf<String, Any>(
+                "enable_itn" to true // 💡 建议改为 true：自动将“一二三”转为“123”，更符合阅读习惯
+            )
+
+            // 5. 组装请求参数
+            val param = MultiModalConversationParam.builder()
+                .apiKey(currentKey)
+                .model("qwen3-asr-flash") // 使用闪速语音大模型
+                .message(userMessage)
+                .parameter("asr_options", asrOptions)
+                .build()
+
+            // 6. 发起同步调用（在 Dispatchers.IO 中执行，保证不卡死 Android 界面）
+            val conv = MultiModalConversation()
+            val result = conv.call(param)
+
+            // ======= 🛠️ 把第 7 步和第 8 步修改为以下安全解析方式 =======
+
+            // 1. 安全获取 choices 列表
+            val choices = result.output?.choices
+            if (!choices.isNullOrEmpty()) {
+                // 2. 拿到第一条回复
+                val firstChoice = choices[0]
+                val message = firstChoice.message
+
+                // 3. qwen3-asr-flash 的文本可能存在两个地方，我们做个双保险读取：
+                // 先尝试读取多模态的 content 列表，如果为空，直接读取普通的 content 字符串
+                val contents = message.content as? List<*>
+                var textResult = ""
+
+                if (!contents.isNullOrEmpty()) {
+                    // 如果是标准的多模态 List 结构
+                    val firstContent = contents[0] as? Map<*, *>
+                    textResult = firstContent?.get("text")?.toString() ?: ""
+                }
+
+                if (textResult.isEmpty()) {
+                    // 如果上面没取到，直接尝试拿普通的文本字段
+                    textResult = message.content?.toString() ?: ""
+                }
+
+                return@withContext textResult.trim().ifEmpty { "语音识别成功，但未检测到说话内容" }
+            }
+
+            return@withContext "大模型未返回有效数据"
+
+        } catch (e: Exception) {
+            // 向上抛出异常，让外层的 try-catch 捕获并显示在界面上
+            throw Exception("语音转文字失败: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 语音合成（TTS）挂起函数：将文字转换为语音并下载到本地缓存
+     * @param textToSpeak 想要让 AI 说出来的文本内容
+     * @param apiKey 从本地存储捞出来的有效 API Key
+     * @param context Android 上下文，用于安全获取缓存目录
+     * @return 返回下载完成后的本地音频 File 对象，如果失败则抛出异常
+     */
+    private suspend fun generateSpeechFromText(
+        textToSpeak: String,
+        apiKey: String,
+        context: Context
+    ): File = withContext(Dispatchers.IO){
+
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .build()
+
+        // 1. 构造请求体
+        val requestBody = JSONObject().apply {
+            put("model", "qwen3-tts-flash")
+            put("input", JSONObject().apply {
+                put("text", "你好")
+                put("voice", "Cherry")
+            })
+        }.toString()
+
+        val request = Request.Builder()
+            .url("https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(requestBody.toRequestBody("application/json".toMediaTypeOrNull()))
+            .build()
+
+        // 2. 执行请求并解析音频 URL
+        var response: Response? = null  // 声明在外部，初始为 null
+        try {
+            response = client.newCall(request).execute()
+        }catch (e: Exception){
+            throw e
+        }
+        if (!response.isSuccessful) {
+            throw Exception("TTS API request failed: ${response.code} - ${response.message}")
+        }
+        val responseBody = response.body?.string() ?: throw IOException("Empty response body")
+        val jsonResponse = JSONObject(responseBody)
+
+        // 根据实际响应结构提取音频 URL
+        val audioUrl = jsonResponse.getJSONObject("output")
+            .getJSONObject("audio")
+            .getString("url")
+        val secureAudioUrl = audioUrl.replace("http://", "https://")
+
+        // 3. 下载音频文件（WAV 格式）
+        val audioFile = File(context.cacheDir, "tts_${System.currentTimeMillis()}.wav")
+        Log.d("TTS_Download", "准备下载音频，URL: $secureAudioUrl")
+        Log.d("TTS_Download", "保存路径: ${audioFile.absolutePath}")
+
+        val audioRequest = Request.Builder().url(secureAudioUrl).get().build()
+        client.newCall(audioRequest).execute().use { audioResponse ->
+            if (!audioResponse.isSuccessful) {
+                throw IOException("下载音频失败，HTTP ${audioResponse.code} - ${audioResponse.message}")
+            }
+
+            val body = audioResponse.body ?: throw IOException("响应体为空")
+            val contentLength = body.contentLength()
+            Log.d("TTS_Download", "音频大小: ${if (contentLength > 0) "$contentLength bytes" else "未知"}")
+
+            FileOutputStream(audioFile).use { outputStream ->
+                body.byteStream().use { inputStream ->
+                    val buffer = ByteArray(8192)
+                    var bytesRead: Int
+                    var totalBytes = 0L
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
+                        totalBytes += bytesRead
+                        if (contentLength > 0) {
+                            val percent = (totalBytes * 100 / contentLength).toInt()
+                            if (percent % 20 == 0) { // 每20%打印一次
+                                Log.d("TTS_Download", "下载进度: $percent%")
+                            }
+                        }
+                    }
+                }
+            }
+            Log.d("TTS_Download", "下载完成，文件大小: ${audioFile.length()} bytes")
+        }
+        return@withContext audioFile
+    }
+
+    // 辅助函数：计算字符串 MD5 用于生成文件名
+    private fun md5(input: String): String {
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(input.toByteArray())
+        return digest.fold("") { str, it -> str + "%02x".format(it) }
+    }
+    /**
+     * 播放本地音频文件的安全函数
+     */
+    private suspend fun playAudioFile(context: Context, audioFile: File) {
+        // 1. 安全检查：如果文件不存在或大小为0，不进行播放
+        if (!audioFile.exists() || audioFile.length() == 0L) {
+            Toast.makeText(context, "音频文件不存在或尚未下载完成", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            // 2. 实例化系统播放器
+            val mediaPlayer = MediaPlayer()
+
+            // 3. 将本地 File 对象转换为 Android 系统认的 Uri 路径，并塞给播放器
+            val audioUri = Uri.fromFile(audioFile)
+            mediaPlayer.setDataSource(context, audioUri)
+
+            // 4. 让播放器异步准备（如果是大文件，这里可以防止卡顿）
+            mediaPlayer.prepareAsync()
+
+            // 5. 监听准备就绪状态，好了之后立刻开始播放
+            mediaPlayer.setOnPreparedListener { player ->
+                player.start()
+            }
+
+            // 6. 💡 避坑关键：监听播放完毕事件，及时释放内存资源！
+            mediaPlayer.setOnCompletionListener { player ->
+                player.release() // 释放底层解码器，防止内存泄漏
+            }
+
+            // 7. 监听报错事件（比如音频损坏），防止播放器崩溃
+            mediaPlayer.setOnErrorListener { player, _, _ ->
+                player.release()
+                Toast.makeText(context, "音频播放出错啦", Toast.LENGTH_SHORT).show()
+                true
+            }
+
+        } catch (e: Exception) {
+            Toast.makeText(context, "播放失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    /**
+     * 编辑apikey的函数
+     */
     @Composable
     fun EditApiKeyDialog(
         showDialog: Boolean,
@@ -455,81 +694,4 @@ class MainActivity : ComponentActivity() {
             }
         )
     }
-
-    /**
-     * 将录音文件发送给千问 ASR 模型进行语音转文字
-     */
-    private suspend fun transcribeAudioWithSdk(audioFile: File, currentKey: String): String = withContext(Dispatchers.IO) {
-        // 1. 初始化基础 API 路径（北京地域固定要求）
-        Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1"
-
-        try {
-            // 2. 将本地 File 转化为百炼 SDK 规范的本地 File URL
-            val localFilePath = "file://${audioFile.absolutePath}"
-
-            // 3. 核心修改：明确指定音频格式为 m4a（兼容你之前定义的临时文件）
-            // 如果你未来换回 mp3，这里改为 "audio/mp3" 即可
-            val audioContent = mapOf(
-                "audio" to localFilePath,
-                "mimetype" to "audio/m4a"
-            )
-
-            val userMessage = MultiModalMessage.builder()
-                .role(Role.USER.value)
-                .content(listOf(audioContent))
-                .build()
-
-            // 4. 配置语音识别的可选参数
-            val asrOptions = hashMapOf<String, Any>(
-                "enable_itn" to true // 💡 建议改为 true：自动将“一二三”转为“123”，更符合阅读习惯
-            )
-
-            // 5. 组装请求参数
-            val param = MultiModalConversationParam.builder()
-                .apiKey(currentKey)
-                .model("qwen3-asr-flash") // 使用闪速语音大模型
-                .message(userMessage)
-                .parameter("asr_options", asrOptions)
-                .build()
-
-            // 6. 发起同步调用（在 Dispatchers.IO 中执行，保证不卡死 Android 界面）
-            val conv = MultiModalConversation()
-            val result = conv.call(param)
-
-            // ======= 🛠️ 把第 7 步和第 8 步修改为以下安全解析方式 =======
-
-            // 1. 安全获取 choices 列表
-            val choices = result.output?.choices
-            if (!choices.isNullOrEmpty()) {
-                // 2. 拿到第一条回复
-                val firstChoice = choices[0]
-                val message = firstChoice.message
-
-                // 3. qwen3-asr-flash 的文本可能存在两个地方，我们做个双保险读取：
-                // 先尝试读取多模态的 content 列表，如果为空，直接读取普通的 content 字符串
-                val contents = message.content as? List<*>
-                var textResult = ""
-
-                if (!contents.isNullOrEmpty()) {
-                    // 如果是标准的多模态 List 结构
-                    val firstContent = contents[0] as? Map<*, *>
-                    textResult = firstContent?.get("text")?.toString() ?: ""
-                }
-
-                if (textResult.isEmpty()) {
-                    // 如果上面没取到，直接尝试拿普通的文本字段
-                    textResult = message.content?.toString() ?: ""
-                }
-
-                return@withContext textResult.trim().ifEmpty { "语音识别成功，但未检测到说话内容" }
-            }
-
-            return@withContext "大模型未返回有效数据"
-
-        } catch (e: Exception) {
-            // 向上抛出异常，让外层的 try-catch 捕获并显示在界面上
-            throw Exception("语音转文字失败: ${e.message}", e)
-        }
-    }
-
 }

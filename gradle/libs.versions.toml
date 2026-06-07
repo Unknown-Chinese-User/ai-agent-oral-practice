@@ -1,6 +1,8 @@
 [versions]
 agp = "9.2.1"
 coreKtx = "1.10.1"
+dashscopeSdkJava = "2.22.20"
+dashscopeTtsAndroid = "1.0.0"
 gson = "2.14.0"
 junit = "4.13.2"
 junitVersion = "1.1.5"
@@ -14,6 +16,8 @@ dashscopeSdk = "2.16.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+dashscope-sdk-java-v2164 = { module = "com.alibaba:dashscope-sdk-java", version.ref = "dashscopeSdkJava" }
+dashscope-tts-android = { module = "com.alibaba:dashscope-tts-android", version.ref = "dashscopeTtsAndroid" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

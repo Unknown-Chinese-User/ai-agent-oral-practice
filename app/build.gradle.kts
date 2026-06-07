@@ -38,7 +38,6 @@ android {
         compose = true
     }
 }
-
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
@@ -58,4 +57,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.alibaba.dashscope)
     implementation(libs.gson)
+    implementation(libs.dashscope.sdk.java.v2164)
+//    implementation(libs.dashscope.tts.android)
 }
